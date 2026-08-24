@@ -18,7 +18,7 @@ from sklearn.feature_extraction.text import CountVectorizer
 import numpy as np
 # 新增：用来判断本地文件夹是否存在
 import os
-# ========== 新增：PDF与纯文本通用加载器 ==========
+# ========== PDF与纯文本通用加载器 ==========
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 
 # ========== 2. 本地嵌入模型（纯本地、不用下载，和之前一样） ==========
@@ -43,18 +43,52 @@ class LocalEmbedding:
         # 把单条问题转成向量
         return self.embed_documents([text])[0]
 
-# ========== 3. 基础配置 ==========
+# ========== 3. 简易版 Rerank 重排序精排模型 ==========
+# 保留两阶段检索架构，内部用关键词打分实现，零模型下载依赖
+# 工业级场景可无缝替换为 bge-reranker 等交叉编码器模型
+class Reranker:
+    def __init__(self):
+        # 无需加载外部模型，纯本地计算，秒启动
+        pass
+    
+    def rerank(self, query: str, docs: list, top_n: int = 2):
+        """
+        对向量粗召回的候选片段重新打分排序
+        query: 用户问题
+        docs: 向量召回的Document对象列表
+        top_n: 返回最相关的前N个
+        """
+        if not docs:
+            return []
+        
+        # 把问题拆成字符集合，计算与文档的重合度
+        query_chars = set(query)
+        scored_list = []
+        
+        for doc in docs:
+            doc_chars = set(doc.page_content)
+            # 重合字符占比作为相关性分数
+            same_chars = query_chars & doc_chars
+            score = len(same_chars) / len(query_chars) if len(query_chars) > 0 else 0
+            scored_list.append((score, doc))
+        
+        # 按分数从高到低排序
+        scored_list.sort(key=lambda x: x[0], reverse=True)
+        # 返回前 top_n 个最相关文档
+        return [doc for score, doc in scored_list[:top_n]]
+
+# ========== 4. 基础配置 ==========
 #deep seek的api接口地址，兼容openai格式
 BASE_URL = "https://api.deepseek.com/v1"
 #使用大模型的名称
 LLM_MODEL = "deepseek-chat"
 #向量库本地保存的文件夹路径，实现持久化（关闭程序再打开数据还在）
 DB_PATH = "./chroma_db"  # 向量库存放的文件夹
-# ========== 新增：知识库文档路径，支持 .txt 和 .pdf 格式 ==========
+# ========== 知识库文档路径，支持 .txt 和 .pdf 格式 ==========
 # 切换格式直接改路径即可，函数自动识别
 DOC_PATH = "./test_doc.pdf"
 
-# ========== 4. 打包：通用文档加载 + 文本切块 ==========
+# ========== 5. 打包：通用文档加载 + 文本切块 ==========
 # 自动识别 txt / pdf，加载后切分，返回纯文本块列表，兼容后续全部原有逻辑
 def load_and_split(file_path):
     # 第一步：根据后缀自动选择加载器
@@ -81,7 +115,7 @@ def load_and_split(file_path):
     text_chunks = [doc.page_content for doc in split_docs]
     return text_chunks
 
-# ========== 5. 核心：向量库持久化逻辑 ==========
+# ========== 6. 核心：向量库持久化逻辑 ==========
 # 判断：本地有现成向量库就加载，没有就新建
 if os.path.exists(DB_PATH) and os.listdir(DB_PATH):
     print("✅ 检测到本地向量库，直接加载...")
@@ -110,10 +144,26 @@ else:
     )
     print("✅ 向量库构建完成，已保存到本地")
 
-# 从向量库拿到检索器：用来搜相关内容
-retriever = vector_db.as_retriever(search_kwargs={"k": 4})# 表示每次召回最相关的 2 段文本
+# 向量粗召回：取4个候选，保证召回率，避免漏答案
+retriever = vector_db.as_retriever(search_kwargs={"k": 8})
+# 初始化 Rerank 精排器
+reranker = Reranker()
 
-# ========== 6. 初始化大模型和提示词 ==========
+# ========== 两阶段检索函数 ==========
+def retrieve_and_rerank(query: str):
+    """
+    第一阶段：向量粗召回4个候选
+    第二阶段：Rerank精排，保留最相关2个
+    返回拼接好的上下文字符串
+    """
+    # 第一步：向量粗召回
+    docs = retriever.invoke(query)
+    # 第二步：重排序精筛
+    ranked_docs = reranker.rerank(query, docs, top_n=2)
+    # 拼接成字符串，送入提示词
+    return "\n\n".join([doc.page_content for doc in ranked_docs])
+
+# ========== 7. 初始化大模型和提示词 ==========
 #初始化大模型实例
 llm = ChatOpenAI(
     model=LLM_MODEL,
@@ -130,12 +180,12 @@ rag_prompt = ChatPromptTemplate.from_template("""
 用户问题：{question}
 """)
 
-# ========== 7. 组装RAG问答流水线 ==========
+# ========== 8. 组装RAG问答流水线 ==========
 #用LangChain的管道语法，把整个流程串起来
 rag_chain = (
         {
-            #第一步：用户问题进来→调用检索器拿相关文档→把多段文档用换行拼接成字符串
-            "context": retriever | (lambda docs: "\n\n".join([d.page_content for d in docs])),
+            # 替换为两阶段检索：粗召回 + Rerank精排
+            "context": lambda query: retrieve_and_rerank(query),
             #第二步：用户问题原封不动透传下去
             "question": RunnablePassthrough()
         }
@@ -147,9 +197,9 @@ rag_chain = (
         | StrOutputParser()
 )
 
-# ========== 8. 交互式问答循环 ==========
+# ========== 9. 交互式问答循环 ==========
 if __name__ == "__main__":
-    print("\n===== RAG知识库问答系统（支持TXT/PDF） =====")
+    print("\n===== RAG知识库问答系统（PDF支持 + 两阶段Rerank精排） =====")
     print("输入问题提问，输入 exit 退出程序\n")
    #死循环，持续接受用户输入
     while True:
