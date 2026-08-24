@@ -22,3 +22,9 @@ chat_log.txt
 # 系统临时文件
 Thumbs.db
 desktop.ini
+
+test_doc.pdf
+
+# Rerank模型缓存、对话历史不上传
+chat_history.json
+~/.cache/huggingface
