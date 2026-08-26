@@ -1,0 +1,19 @@
+# 虚拟环境和缓存
+.venv
+__pycache__
+*.pyc
+
+# 本地生成的向量库（容器运行会自己生成，不用打包）
+chroma_db
+chroma_db_agent
+chroma_db_web
+
+# 配置和测试文件（防止密钥泄露、冗余文件）
+.env
+test_doc.pdf
+chat_history_agent.json
+chat_log_example.txt
+
+# Git相关
+.git
+.gitignore

@@ -181,4 +181,4 @@ with gr.Blocks(title="RAG知识库可视化问答") as demo:
 # ========== 7. 启动网页服务 ==========
 if __name__ == "__main__":
     print("🚀 网页服务启动中，浏览器将自动打开...")
-    demo.launch(server_name="127.0.0.1", server_port=7860)
+    demo.launch(server_name="0.0.0.0", server_port=7860)
